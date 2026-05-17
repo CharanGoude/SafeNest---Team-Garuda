@@ -95,7 +95,7 @@ export default function TransactionsPage() {
                 {tx.merchant_name}
               </div>
               <div style={{ fontSize:12, fontWeight:700, color:"#0f172a" }}>
-                ${tx.amount?.toFixed(2)}
+                ₹{tx.amount?.toFixed(2)}
               </div>
               <div style={{ fontSize:12, fontWeight:800, color: tx.final_risk_score>=75?"#dc2626":tx.final_risk_score>=50?"#ea580c":tx.final_risk_score>=30?"#d97706":"#16a34a" }}>
                 {tx.final_risk_score}
@@ -119,7 +119,7 @@ export default function TransactionsPage() {
                 #{selected.transaction_id}
               </div>
               <div style={{ fontSize:30, fontWeight:800, color:"#0f172a", marginBottom:4 }}>
-                ${selected.amount?.toFixed(2)}
+                ₹{selected.amount?.toFixed(2)}
               </div>
               <div style={{ fontSize:11, color:"#94a3b8", marginBottom:16 }}>
                 {selected.currency} · {selected.timestamp?.slice(0,19).replace("T"," ")} UTC

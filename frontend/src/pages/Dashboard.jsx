@@ -139,7 +139,7 @@ export default function Dashboard({ onNavigate }) {
                 </div>
                 <div style={{ textAlign: "right", flexShrink: 0, minWidth: 80 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>
-                    ${tx.amount?.toFixed(2)}
+                    ₹{tx.amount?.toFixed(2)}
                   </div>
                   <div style={{ fontSize: 11, color: "#94a3b8" }}>{tx.currency}</div>
                 </div>

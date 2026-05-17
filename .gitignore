@@ -24,3 +24,11 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# AWS Deployment & Sensitive Files
+AWS_DEPLOYMENT_QUICKSTART.md
+setup-safenest-aws.sh
+*.pem
+*.key
+credentials/
+secrets/
