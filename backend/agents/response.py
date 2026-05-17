@@ -1,114 +1,104 @@
-"""
-Response Agent — Automated Fraud Mitigation & Security Actions
-Decides and executes the appropriate response based on Sentry + Auditor findings.
-"""
-import os
-import json
-import google.generativeai as genai
-from datetime import datetime
-from models import Transaction
+"""SafeNest v2.0 — Response Agent: Action Engine + Blockchain"""
 
+import time, uuid, hashlib
+from datetime import datetime
+from typing import List, Tuple
+
+THRESHOLDS = {"block":90, "freeze":70, "otp":50, "flag":30}
 
 class ResponseAgent:
-    def __init__(self):
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if api_key:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel("gemini-1.5-flash")
-        else:
-            self.model = None
-        self.name = "Response Agent"
+    def __init__(self, db):
+        self.db = db
 
-    def _build_prompt(self, tx: Transaction, sentry: dict, auditor: dict) -> str:
-        return f"""You are the Response Agent in SafeNest. Your job is to decide the AUTOMATED SECURITY ACTION.
+    async def respond(self, tx, sentry: dict, auditor: dict) -> dict:
+        start = time.time()
 
-TRANSACTION: {tx.transaction_id} | Amount: ${tx.amount} {tx.currency}
-SENTRY RESULT: Risk Score {sentry.get('fraud_risk_score')}/100 | Level: {sentry.get('risk_level')} | Recommendation: {sentry.get('recommendation')}
-AUDITOR RESULT: KYC: {auditor.get('kyc_status')} | AML: {auditor.get('aml_status')} | Compliance: {auditor.get('compliance_status')}
+        # Combine scores: 60% sentry + 40% auditor
+        auditor_score  = self._auditor_score(auditor)
+        final_score    = min(100, int(sentry["risk_score"] * 0.6 + auditor_score * 0.4))
 
-AVAILABLE ACTIONS:
-- APPROVE: Transaction is safe, process normally
-- FLAG_FOR_REVIEW: Suspicious but not definitive — assign to analyst
-- REQUIRE_OTP: Force one-time password verification before processing
-- REQUIRE_BIOMETRIC: Require facial/biometric verification
-- FREEZE_ACCOUNT: Temporarily freeze the account
-- BLOCK: Block this transaction immediately
-- REPORT_REGULATORY: File a regulatory report (SAR/CTR)
-- NOTIFY_ADMIN: Alert security admin team
+        # Hard overrides
+        if auditor["kyc_status"] == "FAILED":      final_score = max(final_score, 95)
+        if auditor["sar_required"]:                 final_score = max(final_score, 75)
 
-Respond ONLY in valid JSON:
-{{
-  "action_taken": "<PRIMARY_ACTION>",
-  "secondary_actions": ["<action1>", "<action2>"],
-  "reasoning": "<2-3 sentence explanation of why this action was chosen>",
-  "alert_message": "<Short user-facing or admin alert message>",
-  "severity": "<INFO|WARNING|CRITICAL>",
-  "estimated_prevention_value": <estimated dollar amount protected>
-}}"""
-
-    async def respond(self, tx: Transaction, sentry: dict, auditor: dict) -> dict:
-        # Deterministic hard rules first
-        if auditor.get("watchlist_status") == "MATCH_FOUND" or auditor.get("kyc_status") == "FAILED":
-            return self._hard_block(tx, "Watchlist match or KYC failure")
-
-        if sentry.get("fraud_risk_score", 0) >= 90:
-            return self._hard_block(tx, "Critical fraud risk score")
-
-        if not self.model:
-            return self._rule_based_response(tx, sentry, auditor)
-
-        try:
-            response = self.model.generate_content(self._build_prompt(tx, sentry, auditor))
-            text = response.text.strip()
-            if "```" in text:
-                text = text.split("```")[1].replace("json", "").strip()
-            result = json.loads(text)
-            result["agent"] = self.name
-            result["timestamp"] = datetime.utcnow().isoformat()
-            return result
-        except Exception:
-            return self._rule_based_response(tx, sentry, auditor)
-
-    def _hard_block(self, tx: Transaction, reason: str) -> dict:
-        return {
-            "agent": self.name,
-            "action_taken": "BLOCK",
-            "secondary_actions": ["FREEZE_ACCOUNT", "NOTIFY_ADMIN", "REPORT_REGULATORY"],
-            "reasoning": f"Hard block triggered: {reason}. Immediate action taken to protect account.",
-            "alert_message": f"ALERT: Transaction {tx.transaction_id} BLOCKED. Security team notified.",
-            "severity": "CRITICAL",
-            "estimated_prevention_value": tx.amount,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    def _rule_based_response(self, tx: Transaction, sentry: dict, auditor: dict) -> dict:
-        score = sentry.get("fraud_risk_score", 0)
-        compliance = auditor.get("compliance_status", "COMPLIANT")
-
-        if score >= 70 or compliance == "NON_COMPLIANT":
-            action = "BLOCK"
-            secondary = ["NOTIFY_ADMIN", "REPORT_REGULATORY"]
-            severity = "CRITICAL"
-        elif score >= 50 or compliance == "REVIEW_REQUIRED":
-            action = "REQUIRE_OTP"
-            secondary = ["FLAG_FOR_REVIEW", "NOTIFY_ADMIN"]
-            severity = "WARNING"
-        elif score >= 30:
-            action = "FLAG_FOR_REVIEW"
-            secondary = ["REQUIRE_OTP"]
-            severity = "WARNING"
-        else:
-            action = "APPROVE"
-            secondary = []
-            severity = "INFO"
+        action, risk_level = self._decide(final_score)
+        secondary          = self._secondary(action, auditor)
+        alert_msg          = self._alert(action, final_score, auditor)
+        reasoning          = self._reasoning(final_score, sentry, auditor, action)
+        block_hash         = self._write_block(tx.transaction_id or "UNKNOWN", action, final_score)
 
         return {
-            "agent": self.name,
-            "action_taken": action,
+            "action":            action,
+            "risk_level":        risk_level,
+            "final_risk_score":  final_score,
+            "reasoning":         reasoning,
+            "alert_message":     alert_msg,
             "secondary_actions": secondary,
-            "reasoning": f"Risk score {score}/100. Compliance: {compliance}. Rule-based action selected.",
-            "alert_message": f"Transaction {tx.transaction_id}: {action}",
-            "severity": severity,
-            "estimated_prevention_value": tx.amount if action == "BLOCK" else 0,
-            "timestamp": datetime.utcnow().isoformat()
+            "processing_ms":     int((time.time()-start)*1000),
+            "blockchain_hash":   block_hash
         }
+
+    def _auditor_score(self, auditor: dict) -> int:
+        base = 0
+        if auditor["compliance_status"] == "NON_COMPLIANT": base = 85
+        elif auditor["compliance_status"] == "FLAGGED":     base = 45
+        base += min(30, len(auditor["regulatory_flags"]) * 8)
+        if auditor["kyc_status"]       == "FAILED":       base = max(base, 90)
+        if auditor["watchlist_status"] == "MATCH_FOUND":  base = max(base, 70)
+        if auditor["sar_required"]:                        base = max(base, 75)
+        if auditor["ctr_required"]:                        base += 10
+        return min(100, base)
+
+    def _decide(self, score: int) -> Tuple[str, str]:
+        if score >= THRESHOLDS["block"]:  return "BLOCK",          "CRITICAL"
+        if score >= THRESHOLDS["freeze"]: return "FREEZE_ACCOUNT", "CRITICAL"
+        if score >= THRESHOLDS["otp"]:    return "REQUIRE_OTP",    "HIGH"
+        if score >= THRESHOLDS["flag"]:   return "FLAG_FOR_REVIEW", "MEDIUM"
+        return "APPROVE", "LOW"
+
+    def _secondary(self, action: str, auditor: dict) -> List[str]:
+        s = []
+        if action in ("BLOCK","FREEZE_ACCOUNT"):
+            s += ["NOTIFY_SECURITY_TEAM","SEND_SMS_ALERT_TO_CUSTOMER"]
+        if auditor["sar_required"]: s.append("FILE_SAR_REPORT")
+        if auditor["ctr_required"]: s.append("FILE_CTR_REPORT")
+        if action == "BLOCK":       s.append("ESCALATE_TO_COMPLIANCE_OFFICER")
+        return s
+
+    def _alert(self, action, score, auditor) -> str:
+        msgs = {
+            "APPROVE":          f"Transaction approved. Risk score {score}/100. No significant threats.",
+            "FLAG_FOR_REVIEW":  f"Flagged for review. Risk score {score}/100. Analyst attention required.",
+            "REQUIRE_OTP":      f"OTP verification required. Risk score {score}/100. Transaction held.",
+            "REQUIRE_BIOMETRIC":f"Biometric verification required. Risk score {score}/100.",
+            "FREEZE_ACCOUNT":   f"CRITICAL: Account frozen. Risk score {score}/100. SAR: {auditor['sar_required']}.",
+            "BLOCK":            f"CRITICAL: Transaction blocked. Risk score {score}/100. Authorities may be notified.",
+        }
+        return msgs.get(action, f"Action: {action}. Score: {score}/100.")
+
+    def _reasoning(self, score, sentry, auditor, action) -> str:
+        parts = []
+        if sentry["fraud_indicators"]:
+            parts.append(f"Fraud: {'; '.join(sentry['fraud_indicators'][:2])}")
+        if auditor["regulatory_flags"]:
+            parts.append(f"Compliance: {'; '.join(auditor['regulatory_flags'][:2])}")
+        if not parts:
+            parts.append("No significant risk indicators")
+        return f"Score {score}/100. Action: {action}. {'. '.join(parts)}."
+
+    def _write_block(self, tx_id: str, action: str, risk_score: int) -> str:
+        prev_hash  = self.db.get_last_block_hash()
+        block_id   = str(uuid.uuid4())[:8].upper()
+        timestamp  = datetime.utcnow().isoformat()
+        content    = f"{block_id}{tx_id}{action}{risk_score}{timestamp}{prev_hash}"
+        block_hash = hashlib.sha256(content.encode()).hexdigest()
+        self.db.save_block({
+            "block_id":       block_id,
+            "transaction_id": tx_id,
+            "action":         action,
+            "risk_score":     risk_score,
+            "block_hash":     block_hash,
+            "prev_hash":      prev_hash,
+            "timestamp":      timestamp,
+        })
+        return block_hash

@@ -1,234 +1,281 @@
 """
-SafeNest - Autonomous Fraud-Guard & Compliance Orchestrator
-FastAPI Backend — Full Agentic Pipeline v2.1
+SafeNest v2.0 — FastAPI Application
+Autonomous Fraud Detection & Compliance System
+Direct 3-agent pipeline — simple bank integration
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import asyncio
+import json
+import random
+import uuid
+from datetime import datetime
+from typing import Optional
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
-from models import Transaction
-from agents.coordinator import CoordinatorAgent
-import asyncio, random, uuid
-from datetime import datetime, timedelta
+from fastapi.security.api_key import APIKeyHeader
 
-app = FastAPI(title="SafeNest API", version="2.1.0")
+from models import TransactionRequest, AnalysisResponse, SentryResult, AuditorResult, ResponseResult, ActionTaken, RiskLevel, ComplianceStatus
+from agents.db.database import db
+from agents.sentry   import SentryAgent
+from agents.auditor  import AuditorAgent
+from agents.response import ResponseAgent
+
+# ── App ───────────────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="SafeNest Fraud Detection API",
+    description="Autonomous Fraud Detection & Compliance Monitoring. Integrate with one API call.",
+    version="2.0.0"
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-coordinator = CoordinatorAgent()
-transaction_history = []
-connected_websockets = []
+# ── Auth ──────────────────────────────────────────────────────────────────────
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-# ── Realistic simulation data ────────────────────────────────────────────────
+async def verify_api_key(api_key: str = Security(API_KEY_HEADER)) -> str:
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required. Add X-API-Key header.")
+    bank_name = db.validate_api_key(api_key)
+    if not bank_name:
+        raise HTTPException(status_code=403, detail="Invalid or inactive API key.")
+    return bank_name
 
-SIMULATION_PROFILES = [
-    # (user_id, account, avg_tx, age_days, usual_country, usual_city)
-    ("user_rahul_k",   "ACC101RAHUL",  450.0,  730, "IN", "Hyderabad"),
-    ("user_priya_m",   "ACC102PRIYA",  800.0,  365, "IN", "Mumbai"),
-    ("user_carlos_r",  "ACC103CARLOS", 1200.0, 900, "US", "New York"),
-    ("user_anna_s",    "ACC104ANNA",   600.0,  500, "GB", "London"),
-    ("user_wei_l",     "ACC105WEI",    2000.0, 180, "SG", "Singapore"),
-    ("user_blacklist", "ACC999BLACKLIST", 500.0, 200, "IN", "Delhi"),  # always triggers
-]
+# ── Agents ────────────────────────────────────────────────────────────────────
+sentry_agent   = SentryAgent()
+auditor_agent  = AuditorAgent()
+response_agent = ResponseAgent(db)
 
-MERCHANT_PROFILES = [
-    ("Swiggy",          "FOOD_DELIVERY",  50,    500,   "IN"),
-    ("Amazon India",    "RETAIL",         200,   5000,  "IN"),
-    ("Flipkart",        "RETAIL",         150,   3000,  "IN"),
-    ("Netflix",         "STREAMING",      650,   700,   "US"),
-    ("Zomato",          "FOOD_DELIVERY",  80,    300,   "IN"),
-    ("Uber",            "RIDE_SHARE",     120,   400,   "IN"),
-    ("HDFC Bank ATM",   "WITHDRAWAL",     5000,  20000, "IN"),
-    ("Steam Games",     "GAMING",         800,   1500,  "US"),
-    ("CryptoFast",      "CRYPTO",         8000,  15000, "RU"),   # high risk
-    ("QuickCash247",    "TRANSFER",       9500,  18000, "KP"),   # high risk
-    ("AnonPay",         "TRANSFER",       12000, 20000, "IR"),   # high risk
-    ("Starbucks",       "FOOD_DELIVERY",  300,   600,   "US"),
-    ("Apple Store",     "RETAIL",         999,   2000,  "US"),
-    ("Paytm",           "TRANSFER",       500,   1000,  "IN"),
-    ("PhonePe",         "TRANSFER",       800,   2000,  "IN"),
-]
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+connections: list = []
 
-SCENARIO_WEIGHTS = [
-    "safe", "safe", "safe",        # 3x safe (most transactions are legit)
-    "medium", "medium",            # 2x medium
-    "high",                        # 1x high
-    "critical",                    # 1x critical
-]
+async def broadcast(data: dict):
+    dead = []
+    for ws in connections:
+        try: await ws.send_json(data)
+        except: dead.append(ws)
+    for ws in dead:
+        if ws in connections: connections.remove(ws)
 
-def generate_realistic_transaction():
-    scenario = random.choice(SCENARIO_WEIGHTS)
-    profile  = random.choice(SIMULATION_PROFILES[:5])  # exclude blacklist for non-critical
-    user_id, account, avg_tx, age_days, usual_country, usual_city = profile
-
-    if scenario == "safe":
-        # Normal transaction for this user
-        merchant = random.choice([m for m in MERCHANT_PROFILES if m[4] == usual_country and m[1] not in ("CRYPTO","TRANSFER")])
-        return Transaction(
-            user_id=user_id, account_number=account,
-            amount=round(random.uniform(avg_tx * 0.3, avg_tx * 1.2), 2),
-            currency="USD", transaction_type="PAYMENT",
-            merchant_name=merchant[0], merchant_category=merchant[1],
-            location_country=usual_country, location_city=usual_city,
-            device_id=f"{user_id}_phone", ip_address=f"192.168.{random.randint(1,50)}.{random.randint(1,255)}",
-            is_new_device=False,
-            previous_transaction_minutes_ago=random.randint(60, 2880),
-            user_avg_transaction=avg_tx, account_age_days=age_days
-        )
-
-    elif scenario == "medium":
-        # Slightly unusual — different city, elevated amount
-        merchant = random.choice(MERCHANT_PROFILES[:8])
-        countries = ["IN", "US", "GB", "AE", "SG"]
-        country = random.choice([c for c in countries if c != usual_country])
-        return Transaction(
-            user_id=user_id, account_number=account,
-            amount=round(avg_tx * random.uniform(2.0, 3.5), 2),
-            currency="USD", transaction_type=random.choice(["PAYMENT", "TRANSFER"]),
-            merchant_name=merchant[0], merchant_category=merchant[1],
-            location_country=country, location_city="Unknown City",
-            device_id=f"{user_id}_phone",
-            ip_address=f"91.{random.randint(100,200)}.{random.randint(1,255)}.{random.randint(1,255)}",
-            is_new_device=True,
-            previous_transaction_minutes_ago=random.randint(5, 30),
-            user_avg_transaction=avg_tx, account_age_days=age_days
-        )
-
-    elif scenario == "high":
-        # High risk — suspicious merchant, large amount, rapid tx
-        merchant = random.choice([m for m in MERCHANT_PROFILES if m[1] in ("CRYPTO", "TRANSFER")])
-        return Transaction(
-            user_id=user_id, account_number=account,
-            amount=round(random.uniform(avg_tx * 4, avg_tx * 8), 2),
-            currency="USD", transaction_type="TRANSFER",
-            merchant_name=merchant[0], merchant_category=merchant[1],
-            location_country=merchant[4], location_city="Unknown",
-            device_id="UNKNOWN_DEVICE_X7",
-            ip_address=f"185.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}",
-            is_new_device=True,
-            previous_transaction_minutes_ago=random.randint(1, 4),
-            user_avg_transaction=avg_tx, account_age_days=age_days
-        )
-
-    else:  # critical — blacklisted account
-        merchant = random.choice([m for m in MERCHANT_PROFILES if m[1] in ("CRYPTO", "TRANSFER")])
-        return Transaction(
-            user_id="user_blacklist", account_number="ACC999BLACKLIST",
-            amount=round(random.uniform(9000, 19000), 2),
-            currency="USD", transaction_type="WITHDRAWAL",
-            merchant_name=merchant[0], merchant_category=merchant[1],
-            location_country=merchant[4], location_city="Unknown",
-            device_id="UNKNOWN_DEVICE_CRITICAL",
-            ip_address=f"185.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}",
-            is_new_device=True,
-            previous_transaction_minutes_ago=1,
-            user_avg_transaction=500.0, account_age_days=200
-        )
-
-# ── Routes ───────────────────────────────────────────────────────────────────
-
-@app.get("/health")
-def health():
-    return {
-        "status": "operational", "version": "2.1.0",
-        "agents": ["Coordinator Agent", "Sentry Agent", "Auditor Agent", "Response Agent"],
-        "ai_powered": True, "timestamp": datetime.utcnow().isoformat()
-    }
-
-@app.post("/analyze")
-async def analyze(tx: Transaction):
+# ── Core pipeline (3 agents, no coordinator) ──────────────────────────────────
+async def run_pipeline(tx: TransactionRequest) -> AnalysisResponse:
     tx.transaction_id = tx.transaction_id or str(uuid.uuid4())[:8].upper()
-    tx.timestamp = tx.timestamp or datetime.utcnow().isoformat()
+    timestamp = datetime.utcnow().isoformat()
 
-    result = await coordinator.process_transaction(tx)
+    # Step 1 & 2: Run Sentry and Auditor in PARALLEL
+    sentry_raw, auditor_raw = await asyncio.gather(
+        sentry_agent.analyze(tx),
+        auditor_agent.verify(tx, 0)
+    )
 
-    record = {
-        "transaction_id": tx.transaction_id,
-        "timestamp": tx.timestamp,
-        "user_id": tx.user_id,
-        "account_number": tx.account_number,
-        "amount": tx.amount,
-        "currency": tx.currency,
-        "transaction_type": tx.transaction_type,
-        "merchant": tx.merchant_name or "N/A",
-        "merchant_category": tx.merchant_category or "N/A",
-        "location": f"{tx.location_city or ''}, {tx.location_country}".strip(", "),
-        "location_country": tx.location_country,
-        "is_new_device": tx.is_new_device,
-        "fraud_risk_score": result.get("fraud_risk_score", 0),
-        "risk_level": result.get("risk_level", "LOW"),
-        "action_taken": result.get("action_taken", "APPROVE"),
-        "compliance_status": result.get("compliance_status", "COMPLIANT"),
-        "severity": result.get("severity", "INFO"),
-        "sentry": result.get("sentry_result", {}),
-        "auditor": result.get("auditor_result", {}),
-        "response": result.get("response_result", {}),
-        "coordinator": result.get("coordinator", {}),
-        "agent_pipeline": result.get("agent_pipeline", []),
-        "total_processing_ms": result.get("total_processing_ms", 0),
-    }
-    transaction_history.insert(0, record)
-    if len(transaction_history) > 200:
-        transaction_history.pop()
+    # Step 2b: Re-verify auditor with actual sentry score for SAR logic
+    auditor_raw = await auditor_agent.verify(tx, sentry_raw["risk_score"])
 
-    if record["severity"] != "INFO":
-        for ws in connected_websockets[:]:
-            try:
-                await ws.send_json({"type": "new_transaction", "data": record})
-            except:
-                connected_websockets.remove(ws)
+    # Step 3: Response agent decides action
+    response_raw = await response_agent.respond(tx, sentry_raw, auditor_raw)
 
-    return record
+    total_ms = sentry_raw["processing_ms"] + auditor_raw["processing_ms"] + response_raw["processing_ms"]
 
-@app.get("/transactions")
-def get_transactions(limit: int = 50):
-    return {"transactions": transaction_history[:limit], "total": len(transaction_history)}
+    # Build typed result objects
+    sentry_r = SentryResult(**{k:v for k,v in sentry_raw.items() if k in SentryResult.model_fields})
+    auditor_r = AuditorResult(
+        compliance_status = ComplianceStatus(auditor_raw["compliance_status"]),
+        kyc_status        = auditor_raw["kyc_status"],
+        aml_status        = auditor_raw["aml_status"],
+        watchlist_status  = auditor_raw["watchlist_status"],
+        ctr_required      = auditor_raw["ctr_required"],
+        sar_required      = auditor_raw["sar_required"],
+        regulatory_flags  = auditor_raw["regulatory_flags"],
+        processing_ms     = auditor_raw["processing_ms"]
+    )
+    response_r = ResponseResult(
+        action           = ActionTaken(response_raw["action"]),
+        risk_level       = RiskLevel(response_raw["risk_level"]),
+        final_risk_score = response_raw["final_risk_score"],
+        reasoning        = response_raw["reasoning"],
+        alert_message    = response_raw["alert_message"],
+        secondary_actions= response_raw["secondary_actions"],
+        processing_ms    = response_raw["processing_ms"]
+    )
 
-@app.get("/stats")
-def get_stats():
-    if not transaction_history:
-        return {"total":0,"approved":0,"blocked":0,"flagged":0,"otp":0,
-                "avg_risk":0.0,"critical_count":0,"warning_count":0,
-                "fraud_rate":0.0,"total_protected":0.0}
-    total    = len(transaction_history)
-    approved = sum(1 for t in transaction_history if t["action_taken"] == "APPROVE")
-    blocked  = sum(1 for t in transaction_history if t["action_taken"] in ("BLOCK","FREEZE_ACCOUNT"))
-    flagged  = sum(1 for t in transaction_history if t["action_taken"] == "FLAG_FOR_REVIEW")
-    otp      = sum(1 for t in transaction_history if t["action_taken"] in ("REQUIRE_OTP","REQUIRE_BIOMETRIC"))
-    critical = sum(1 for t in transaction_history if t["severity"] == "CRITICAL")
-    warning  = sum(1 for t in transaction_history if t["severity"] == "WARNING")
-    avg_risk = sum(t["fraud_risk_score"] for t in transaction_history) / total
-    protected= sum(t.get("response",{}).get("estimated_prevention_value",0) or 0 for t in transaction_history)
-    return {
-        "total":total,"approved":approved,"blocked":blocked,"flagged":flagged,"otp":otp,
-        "avg_risk":round(avg_risk,1),"critical_count":critical,"warning_count":warning,
-        "fraud_rate":round((total-approved)/total*100,1),
-        "total_protected":round(protected,2)
-    }
+    analysis = AnalysisResponse(
+        transaction_id     = tx.transaction_id,
+        timestamp          = timestamp,
+        processing_time_ms = total_ms,
+        action             = response_r.action,
+        risk_level         = response_r.risk_level,
+        final_risk_score   = response_r.final_risk_score,
+        compliance_status  = auditor_r.compliance_status,
+        ctr_required       = auditor_r.ctr_required,
+        sar_required       = auditor_r.sar_required,
+        sentry             = sentry_r,
+        auditor            = auditor_r,
+        response           = response_r,
+        blockchain_hash    = response_raw.get("blockchain_hash", "N/A")
+    )
 
-@app.post("/simulate")
-async def simulate(count: int = 6):
-    results = []
-    for _ in range(count):
-        tx  = generate_realistic_transaction()
-        res = await analyze(tx)
-        results.append({
-            "transaction_id": res["transaction_id"],
-            "user": res["user_id"],
-            "merchant": res["merchant"],
-            "amount": res["amount"],
-            "action": res["action_taken"],
-            "risk_score": res["fraud_risk_score"],
-            "severity": res["severity"]
+    # Save to DB
+    db.save_transaction({
+        "transaction_id":     tx.transaction_id,
+        "timestamp":          timestamp,
+        "account_number":     tx.account_number,
+        "user_id":            tx.user_id,
+        "amount":             tx.amount,
+        "currency":           tx.currency,
+        "transaction_type":   tx.transaction_type.value,
+        "merchant_name":      tx.merchant_name,
+        "merchant_category":  tx.merchant_category,
+        "location_country":   tx.location_country,
+        "location_city":      tx.location_city,
+        "device_id":          tx.device_id,
+        "ip_address":         tx.ip_address,
+        "is_new_device":      int(tx.is_new_device),
+        "action":             response_r.action.value,
+        "risk_level":         response_r.risk_level.value,
+        "final_risk_score":   response_r.final_risk_score,
+        "compliance_status":  auditor_r.compliance_status.value,
+        "ctr_required":       int(auditor_r.ctr_required),
+        "sar_required":       int(auditor_r.sar_required),
+        "blockchain_hash":    response_raw.get("blockchain_hash","N/A"),
+        "fraud_indicators":   json.dumps(sentry_r.fraud_indicators),
+        "regulatory_flags":   json.dumps(auditor_r.regulatory_flags),
+        "processing_time_ms": total_ms,
+        "sentry_score":       sentry_r.risk_score,
+        "auditor_status":     auditor_r.compliance_status.value,
+    })
+
+    # Broadcast alert if high risk
+    if response_r.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+        await broadcast({
+            "type":           "ALERT",
+            "transaction_id": tx.transaction_id,
+            "action":         response_r.action.value,
+            "risk_level":     response_r.risk_level.value,
+            "risk_score":     response_r.final_risk_score,
+            "merchant":       tx.merchant_name,
+            "amount":         tx.amount,
+            "timestamp":      timestamp,
         })
-        await asyncio.sleep(0.08)
-    return {"simulated": count, "results": results}
+
+    return analysis
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/", include_in_schema=False)
+def root():
+    return {"name":"SafeNest Fraud Detection API","version":"2.0.0","docs":"/docs","health":"/health"}
+
+@app.get("/health", tags=["System"])
+def health():
+    stats = db.get_stats()
+    return {
+        "status":         "healthy",
+        "version":        "2.0.0",
+        "agents":         ["Sentry Agent","Auditor Agent","Response Agent"],
+        "gemini_enabled": bool(os.getenv("GOOGLE_API_KEY")),
+        "database":       "connected",
+        "total_analyzed": stats.get("total",0),
+        "timestamp":      datetime.utcnow().isoformat()
+    }
+
+@app.post("/api/v1/analyze", response_model=AnalysisResponse, tags=["Core"])
+async def analyze(tx: TransactionRequest, bank_name: str = Depends(verify_api_key)):
+    """Main endpoint — analyze transaction through all 3 agents."""
+    try:
+        return await run_pipeline(tx)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/transactions", tags=["Data"])
+async def get_transactions(
+    limit:int=50, offset:int=0,
+    action:Optional[str]=None, risk_level:Optional[str]=None,
+    bank_name:str=Depends(verify_api_key)
+):
+    txs = db.get_transactions(limit=limit, offset=offset, action=action, risk_level=risk_level)
+    for t in txs:
+        try:
+            t["fraud_indicators"] = json.loads(t.get("fraud_indicators","[]"))
+            t["regulatory_flags"] = json.loads(t.get("regulatory_flags","[]"))
+        except: pass
+    return {"transactions":txs,"total":len(txs),"limit":limit,"offset":offset}
+
+@app.get("/api/v1/transactions/{tx_id}", tags=["Data"])
+async def get_transaction(tx_id:str, bank_name:str=Depends(verify_api_key)):
+    tx = db.get_transaction_by_id(tx_id)
+    if not tx: raise HTTPException(status_code=404, detail="Transaction not found")
+    try:
+        tx["fraud_indicators"] = json.loads(tx.get("fraud_indicators","[]"))
+        tx["regulatory_flags"] = json.loads(tx.get("regulatory_flags","[]"))
+    except: pass
+    tx["audit_logs"] = db.get_audit_logs(tx_id)
+    return tx
+
+@app.get("/api/v1/stats", tags=["Data"])
+async def get_stats(bank_name:str=Depends(verify_api_key)):
+    return db.get_stats()
+
+@app.get("/api/v1/blockchain", tags=["Compliance"])
+async def get_blockchain(limit:int=100, bank_name:str=Depends(verify_api_key)):
+    ledger = db.get_blockchain(limit=limit)
+    return {"ledger":ledger,"total_blocks":len(ledger),"chain_valid":True}
+
+@app.post("/api/v1/simulate", tags=["Testing"])
+async def simulate(count:int=5, bank_name:str=Depends(verify_api_key)):
+    profiles = [
+        ("user_rahul_k",  "ACC101RAHUL",    450.0, 730,"IN","Mumbai",   "iPhone_14_A1"),
+        ("user_priya_m",  "ACC102PRIYA",    800.0, 365,"IN","Delhi",    "Samsung_S23"),
+        ("user_carlos_r", "ACC103CARLOS",  1200.0, 900,"US","New York", "MacBook_Pro"),
+        ("user_anna_s",   "ACC104ANNA",     600.0, 500,"GB","London",   "Pixel_7"),
+    ]
+    merchants = [
+        ("Amazon India","RETAIL","IN"),("Swiggy","FOOD","IN"),
+        ("Netflix","STREAMING","US"),("CryptoFast","CRYPTO","RU"),
+        ("QuickCash247","TRANSFER","KP"),("Starbucks","FOOD","US"),
+    ]
+    scenarios = ["safe","safe","medium","high","critical"]
+    results   = []
+
+    for _ in range(min(count,10)):
+        p = random.choice(profiles)
+        uid,acc,avg_tx,age,country,city,device = p
+        scenario = random.choice(scenarios)
+        m = random.choice(merchants)
+
+        if scenario == "safe":
+            amt=round(avg_tx*random.uniform(0.3,1.2),2); new=False; mins=random.randint(60,2880)
+            ip=f"192.168.{random.randint(1,50)}.{random.randint(1,255)}"; merch=merchants[0]
+        elif scenario == "medium":
+            amt=round(avg_tx*random.uniform(3.0,4.5),2); new=True; mins=random.randint(8,25)
+            ip=f"91.{random.randint(100,200)}.{random.randint(1,255)}.1"; merch=merchants[3]
+        elif scenario == "high":
+            amt=round(avg_tx*random.uniform(5.0,9.0),2); new=True; mins=2
+            ip=f"185.{random.randint(1,255)}.{random.randint(1,255)}.1"; merch=merchants[4]
+        else:
+            acc="ACC999BLACKLIST"; amt=round(random.uniform(9000,18000),2); new=True; mins=1
+            ip=f"185.{random.randint(1,255)}.{random.randint(1,255)}.1"; merch=merchants[4]
+
+        tx = TransactionRequest(
+            user_id=uid, account_number=acc, amount=amt, currency="INR",
+            transaction_type="PAYMENT", merchant_name=merch[0], merchant_category=merch[1],
+            location_country=merch[2] if scenario in ("high","critical") else country,
+            location_city=city, device_id=device if not new else "UNKNOWN_DEVICE_X7",
+            ip_address=ip, is_new_device=new, account_age_days=age,
+            user_avg_transaction=avg_tx, previous_transaction_minutes_ago=mins
+        )
+        r = await run_pipeline(tx)
+        results.append({"transaction_id":r.transaction_id,"action":r.action.value,"risk_score":r.final_risk_score,"risk_level":r.risk_level.value})
+        await asyncio.sleep(0.05)
+
+    return {"simulated":len(results),"results":results}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    connected_websockets.append(websocket)
+    connections.append(websocket)
     try:
-        while True:
-            await websocket.receive_text()
+        while True: await websocket.receive_text()
     except WebSocketDisconnect:
-        if websocket in connected_websockets:
-            connected_websockets.remove(websocket)
+        if websocket in connections: connections.remove(websocket)

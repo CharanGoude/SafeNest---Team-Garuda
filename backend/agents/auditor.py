@@ -1,110 +1,125 @@
-"""
-Auditor Agent — Regulatory Compliance Verification
-Performs KYC, AML, Watchlist screening using Google Gemini.
-"""
-import os
-import json
-import google.generativeai as genai
-from models import Transaction
+"""SafeNest v2.0 — Auditor Agent: KYC / AML / Compliance"""
 
+import os, json, time, asyncio
+from typing import List, Tuple
+
+try:
+    import google.generativeai as genai
+    GEMINI_OK = True
+except ImportError:
+    GEMINI_OK = False
+
+KYC_BLACKLIST        = {"ACC999BLACKLIST","ACC666FRAUD","ACC000SANCTIONED","ACC888BLOCKED","ACC111FROZEN"}
+AML_HIGH_RISK        = {"KP","IR","SY","CU","SD","MM","YE","SO","LY"}
+MERCHANT_WATCHLIST   = {"CryptoFast","QuickCash247","AnonPay","DarkMart","FastCoin","CryptoSwap","AnonymousPay","CashFlash"}
+CTR_THRESHOLD        = 10_000.0
+STRUCTURING_LOW      = 8_000.0
+STRUCTURING_HIGH     = 9_999.99
 
 class AuditorAgent:
     def __init__(self):
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if api_key:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel("gemini-1.5-flash")
+        self.model = None
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if GEMINI_OK and api_key:
+            try:
+                genai.configure(api_key=api_key)
+                self.model = genai.GenerativeModel(
+                    "gemini-1.5-flash",
+                    generation_config={"temperature":0.0,"max_output_tokens":256}
+                )
+            except Exception as e:
+                print(f"[Auditor] Gemini init failed: {e}")
+
+    async def verify(self, tx, sentry_score: int) -> dict:
+        start = time.time()
+        kyc, aml, watchlist, flags, ctr, sar = self._rules(tx, sentry_score)
+
+        if kyc == "FAILED" or watchlist == "MATCH_FOUND":
+            compliance = "NON_COMPLIANT"
+        elif aml == "FLAGGED" or flags:
+            compliance = "FLAGGED"
         else:
-            self.model = None
-        self.name = "Auditor Agent"
+            compliance = "COMPLIANT"
 
-        # Simulated watchlist
-        self.watchlist_accounts = {"ACC999BLACKLIST", "ACC888SANCTION", "BLOCKEDUSER01"}
-        self.high_risk_merchants = {"CRYPTO_UNREGULATED", "DARKWEB_MARKET", "ANONYMOUS_TRANSFER"}
-
-    def _build_prompt(self, tx: Transaction, sentry_result: dict) -> str:
-        return f"""You are the Auditor Agent in SafeNest, responsible for regulatory compliance verification.
-
-Perform KYC, AML, and compliance checks on this transaction.
-
-TRANSACTION:
-- ID: {tx.transaction_id}
-- User: {tx.user_id}
-- Account: {tx.account_number}
-- Amount: {tx.amount} {tx.currency}
-- Type: {tx.transaction_type}
-- Country: {tx.location_country}
-- Merchant: {tx.merchant_name or 'N/A'} ({tx.merchant_category or 'N/A'})
-- Account Age: {tx.account_age_days or 'N/A'} days
-
-SENTRY FRAUD SCORE: {sentry_result.get('fraud_risk_score', 0)}/100
-
-COMPLIANCE CHECKS REQUIRED:
-1. KYC Verification — Is the user identity verifiable? Red flags?
-2. AML Monitoring — Does this show money laundering patterns (structuring, layering, rapid movement)?
-3. Watchlist Screening — Flag if account matches known bad actors
-4. Transaction Pattern — Is this consistent with legitimate business?
-5. Regulatory Threshold — Transactions above $10,000 require reporting (CTR)
-
-Respond ONLY in valid JSON:
-{{
-  "kyc_status": "<VERIFIED|FLAGGED|FAILED>",
-  "aml_status": "<CLEAR|SUSPICIOUS|VIOLATION>",
-  "watchlist_status": "<CLEAR|MATCH_FOUND>",
-  "ctr_required": <true|false>,
-  "compliance_status": "<COMPLIANT|REVIEW_REQUIRED|NON_COMPLIANT>",
-  "compliance_notes": "<2-3 sentence summary>",
-  "regulatory_flags": ["<flag1>", "<flag2>"]
-}}"""
-
-    async def verify(self, tx: Transaction, sentry_result: dict) -> dict:
-        # First do deterministic checks
-        deterministic = self._deterministic_checks(tx)
-
-        if not self.model:
-            return {**deterministic, "agent": self.name}
-
-        try:
-            response = self.model.generate_content(self._build_prompt(tx, sentry_result))
-            text = response.text.strip()
-            if "```" in text:
-                text = text.split("```")[1].replace("json", "").strip()
-            ai_result = json.loads(text)
-
-            # Merge: deterministic overrides on hard violations
-            if deterministic.get("watchlist_hit"):
-                ai_result["watchlist_status"] = "MATCH_FOUND"
-                ai_result["compliance_status"] = "NON_COMPLIANT"
-            if tx.amount >= 10000:
-                ai_result["ctr_required"] = True
-
-            ai_result["agent"] = self.name
-            return ai_result
-        except Exception:
-            return {**deterministic, "agent": self.name}
-
-    def _deterministic_checks(self, tx: Transaction) -> dict:
-        watchlist_hit = tx.account_number in self.watchlist_accounts or tx.user_id in self.watchlist_accounts
-        merchant_risk = tx.merchant_name in self.high_risk_merchants if tx.merchant_name else False
-        ctr_required = tx.amount >= 10000
-        aml_flags = []
-
-        # Structuring check (just below reporting threshold)
-        if 9000 <= tx.amount < 10000:
-            aml_flags.append("Potential structuring — amount just below CTR threshold")
-
-        if merchant_risk:
-            aml_flags.append(f"High-risk merchant category: {tx.merchant_name}")
-
-        compliance = "NON_COMPLIANT" if watchlist_hit else "REVIEW_REQUIRED" if aml_flags else "COMPLIANT"
+        if self.model and compliance != "COMPLIANT":
+            try:
+                ai_flags = await self._gemini(tx, kyc, aml, watchlist)
+                flags = list(set(flags + ai_flags))
+            except Exception as e:
+                print(f"[Auditor] Gemini failed: {e}")
 
         return {
-            "kyc_status": "FAILED" if watchlist_hit else "VERIFIED",
-            "aml_status": "VIOLATION" if watchlist_hit else "SUSPICIOUS" if aml_flags else "CLEAR",
-            "watchlist_status": "MATCH_FOUND" if watchlist_hit else "CLEAR",
-            "ctr_required": ctr_required,
             "compliance_status": compliance,
-            "compliance_notes": f"{'Watchlist match detected. Account flagged.' if watchlist_hit else 'No watchlist match.'} {'CTR filing required.' if ctr_required else ''} {len(aml_flags)} AML flag(s).",
-            "regulatory_flags": aml_flags,
-            "watchlist_hit": watchlist_hit
+            "kyc_status":        kyc,
+            "aml_status":        aml,
+            "watchlist_status":  watchlist,
+            "ctr_required":      ctr,
+            "sar_required":      sar,
+            "regulatory_flags":  flags,
+            "processing_ms":     int((time.time()-start)*1000)
         }
+
+    def _rules(self, tx, sentry_score) -> Tuple[str,str,str,List[str],bool,bool]:
+        flags = []
+
+        # KYC
+        if tx.account_number in KYC_BLACKLIST:
+            kyc = "FAILED"
+            flags.append(f"CRITICAL: Account {tx.account_number} on KYC blacklist")
+        else:
+            kyc = "VERIFIED"
+
+        # AML
+        aml_flags = []
+        if tx.location_country.upper() in AML_HIGH_RISK:
+            aml_flags.append(f"Transaction from high-risk jurisdiction: {tx.location_country}")
+        if STRUCTURING_LOW <= tx.amount <= STRUCTURING_HIGH:
+            aml_flags.append(f"Potential structuring: ${tx.amount:,.2f} just below CTR threshold")
+        if tx.previous_transaction_minutes_ago is not None and tx.previous_transaction_minutes_ago < 5 and tx.amount > 2000:
+            aml_flags.append("Rapid high-value transfer sequence — possible layering")
+        if tx.merchant_category == "CRYPTO" and tx.amount > 5000:
+            aml_flags.append("Large cryptocurrency transaction — AML monitoring required")
+        aml = "FLAGGED" if aml_flags else "CLEAR"
+        flags.extend(aml_flags)
+
+        # Watchlist
+        if tx.merchant_name in MERCHANT_WATCHLIST:
+            watchlist = "MATCH_FOUND"
+            flags.append(f"Merchant '{tx.merchant_name}' on financial crime watchlist")
+        else:
+            watchlist = "CLEAR"
+
+        # CTR
+        ctr = tx.amount >= CTR_THRESHOLD
+        if ctr:
+            flags.append(f"CTR required: ${tx.amount:,.2f} exceeds $10,000")
+
+        # SAR
+        sar = kyc == "FAILED" or watchlist == "MATCH_FOUND" or (sentry_score >= 70 and aml == "FLAGGED")
+        if sar:
+            flags.append("SAR filing required: multiple high-risk indicators")
+
+        return kyc, aml, watchlist, flags, ctr, sar
+
+    async def _gemini(self, tx, kyc, aml, watchlist) -> List[str]:
+        prompt = f"""You are a bank compliance officer. Review for additional regulatory concerns.
+
+Transaction:
+- Account: {tx.account_number} (KYC: {kyc})
+- Amount: ${tx.amount:,.2f} | Type: {tx.transaction_type}
+- Merchant: {tx.merchant_name} ({tx.merchant_category}) | Watchlist: {watchlist}
+- Country: {tx.location_country} | AML: {aml}
+- Account age: {tx.account_age_days} days
+
+Return ONLY JSON (no markdown):
+{{"additional_flags": ["<flag1>", "<flag2>"]}}
+
+Return empty array if no additional concerns."""
+
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(None, lambda: self.model.generate_content(prompt))
+        text = resp.text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"): text = text[4:]
+        return json.loads(text.strip()).get("additional_flags", [])
