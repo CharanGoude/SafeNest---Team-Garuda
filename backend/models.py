@@ -67,6 +67,13 @@ class SentryResult(BaseModel):
     behavioural_summary: str       = ""
     processing_ms:       int       = 0
 
+class CoordinatorResult(BaseModel):
+    risk_score:             int       = Field(..., ge=0, le=100)
+    comparison_indicators:  List[str] = []
+    parameter_changes:      List[str] = []
+    is_baseline:            bool      = False
+    processing_ms:          int       = 0
+
 class AuditorResult(BaseModel):
     compliance_status: ComplianceStatus
     kyc_status:        str
@@ -96,7 +103,6 @@ class AnalysisResponse(BaseModel):
     compliance_status:  ComplianceStatus
     ctr_required:       bool
     sar_required:       bool
-    sentry:             SentryResult
-    auditor:            AuditorResult
+    coordinator:        CoordinatorResult
     response:           ResponseResult
     blockchain_hash:    str

@@ -18,10 +18,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 
-from models import TransactionRequest, AnalysisResponse, SentryResult, AuditorResult, ResponseResult, ActionTaken, RiskLevel, ComplianceStatus
+from models import TransactionRequest, AnalysisResponse, SentryResult, CoordinatorResult, ResponseResult, ActionTaken, RiskLevel, ComplianceStatus
 from agents.db.database import db
-from agents.sentry   import SentryAgent
-from agents.auditor  import AuditorAgent
+from agents.coordinator import CoordinatorAgent
 from agents.response import ResponseAgent
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -44,8 +43,7 @@ async def verify_api_key(api_key: str = Security(API_KEY_HEADER)) -> str:
     return bank_name
 
 # ── Agents ────────────────────────────────────────────────────────────────────
-sentry_agent   = SentryAgent()
-auditor_agent  = AuditorAgent()
+coordinator_agent = CoordinatorAgent(db)
 response_agent = ResponseAgent(db)
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -59,37 +57,31 @@ async def broadcast(data: dict):
     for ws in dead:
         if ws in connections: connections.remove(ws)
 
-# ── Core pipeline (3 agents, no coordinator) ──────────────────────────────────
+# ── Core pipeline (Coordinator Agent) ─────────────────────────────────────────
 async def run_pipeline(tx: TransactionRequest) -> AnalysisResponse:
     tx.transaction_id = tx.transaction_id or str(uuid.uuid4())[:8].upper()
     timestamp = datetime.utcnow().isoformat()
 
-    # Step 1 & 2: Run Sentry and Auditor in PARALLEL
-    sentry_raw, auditor_raw = await asyncio.gather(
-        sentry_agent.analyze(tx),
-        auditor_agent.verify(tx, 0)
-    )
+    # Step 1: Get baseline transaction (if exists)
+    baseline = db.get_baseline_transaction(tx.user_id, tx.account_number)
 
-    # Step 2b: Re-verify auditor with actual sentry score for SAR logic
-    auditor_raw = await auditor_agent.verify(tx, sentry_raw["risk_score"])
+    # Step 2: Run Coordinator agent (compares to baseline)
+    coordinator_raw = await coordinator_agent.analyze(tx, baseline)
 
-    # Step 3: Response agent decides action
-    response_raw = await response_agent.respond(tx, sentry_raw, auditor_raw)
+    # Step 3: Response agent decides action based on coordinator score
+    response_raw = await response_agent.respond(tx, coordinator_raw)
 
-    total_ms = sentry_raw["processing_ms"] + auditor_raw["processing_ms"] + response_raw["processing_ms"]
+    total_ms = coordinator_raw["processing_ms"] + response_raw["processing_ms"]
 
     # Build typed result objects
-    sentry_r = SentryResult(**{k:v for k,v in sentry_raw.items() if k in SentryResult.model_fields})
-    auditor_r = AuditorResult(
-        compliance_status = ComplianceStatus(auditor_raw["compliance_status"]),
-        kyc_status        = auditor_raw["kyc_status"],
-        aml_status        = auditor_raw["aml_status"],
-        watchlist_status  = auditor_raw["watchlist_status"],
-        ctr_required      = auditor_raw["ctr_required"],
-        sar_required      = auditor_raw["sar_required"],
-        regulatory_flags  = auditor_raw["regulatory_flags"],
-        processing_ms     = auditor_raw["processing_ms"]
+    coordinator_r = CoordinatorResult(
+        risk_score = coordinator_raw["risk_score"],
+        comparison_indicators = coordinator_raw.get("comparison_indicators", []),
+        parameter_changes = coordinator_raw.get("parameter_changes", []),
+        is_baseline = coordinator_raw.get("is_baseline", False),
+        processing_ms = coordinator_raw["processing_ms"]
     )
+
     response_r = ResponseResult(
         action           = ActionTaken(response_raw["action"]),
         risk_level       = RiskLevel(response_raw["risk_level"]),
@@ -100,6 +92,14 @@ async def run_pipeline(tx: TransactionRequest) -> AnalysisResponse:
         processing_ms    = response_raw["processing_ms"]
     )
 
+    # For backward compatibility with frontend, create empty Sentry result
+    sentry_r = SentryResult(
+        risk_score = coordinator_raw["risk_score"],
+        fraud_indicators = coordinator_raw.get("comparison_indicators", []),
+        behavioural_summary = f"Baseline comparison: {'; '.join(coordinator_raw.get('parameter_changes', [])[:2])}",
+        processing_ms = coordinator_raw["processing_ms"]
+    )
+
     analysis = AnalysisResponse(
         transaction_id     = tx.transaction_id,
         timestamp          = timestamp,
@@ -107,11 +107,10 @@ async def run_pipeline(tx: TransactionRequest) -> AnalysisResponse:
         action             = response_r.action,
         risk_level         = response_r.risk_level,
         final_risk_score   = response_r.final_risk_score,
-        compliance_status  = auditor_r.compliance_status,
-        ctr_required       = auditor_r.ctr_required,
-        sar_required       = auditor_r.sar_required,
-        sentry             = sentry_r,
-        auditor            = auditor_r,
+        compliance_status  = ComplianceStatus.COMPLIANT,
+        ctr_required       = False,
+        sar_required       = False,
+        coordinator        = coordinator_r,
         response           = response_r,
         blockchain_hash    = response_raw.get("blockchain_hash", "N/A")
     )
@@ -135,15 +134,14 @@ async def run_pipeline(tx: TransactionRequest) -> AnalysisResponse:
         "action":             response_r.action.value,
         "risk_level":         response_r.risk_level.value,
         "final_risk_score":   response_r.final_risk_score,
-        "compliance_status":  auditor_r.compliance_status.value,
-        "ctr_required":       int(auditor_r.ctr_required),
-        "sar_required":       int(auditor_r.sar_required),
+        "compliance_status":  "COMPLIANT",
+        "ctr_required":       0,
+        "sar_required":       0,
         "blockchain_hash":    response_raw.get("blockchain_hash","N/A"),
-        "fraud_indicators":   json.dumps(sentry_r.fraud_indicators),
-        "regulatory_flags":   json.dumps(auditor_r.regulatory_flags),
+        "fraud_indicators":   json.dumps(coordinator_raw.get("comparison_indicators", [])),
+        "regulatory_flags":   json.dumps([]),
         "processing_time_ms": total_ms,
-        "sentry_score":       sentry_r.risk_score,
-        "auditor_status":     auditor_r.compliance_status.value,
+        "sentry_score":       coordinator_raw["risk_score"],
     })
 
     # Broadcast alert if high risk
@@ -173,8 +171,7 @@ def health():
     return {
         "status":         "healthy",
         "version":        "2.0.0",
-        "agents":         ["Sentry Agent","Auditor Agent","Response Agent"],
-        "gemini_enabled": bool(os.getenv("GOOGLE_API_KEY")),
+        "agents":         ["Coordinator Agent","Response Agent"],
         "database":       "connected",
         "total_analyzed": stats.get("total",0),
         "timestamp":      datetime.utcnow().isoformat()

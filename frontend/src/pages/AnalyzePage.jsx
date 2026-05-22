@@ -90,7 +90,7 @@ export default function AnalyzePage() {
           Analyze Transaction
         </h1>
         <p style={{ fontSize: 13, color: "#94a3b8" }}>
-          Submit a transaction through all 3 agents · Real-time analysis
+          Baseline comparison engine • Each transaction compared to the first one • Risk increases based on deviations
         </p>
       </div>
 
@@ -198,6 +198,60 @@ export default function AnalyzePage() {
                       </span>
                     )}
                   </div>
+                </div>
+              </Card>
+
+              {/* Risk Breakdown */}
+              <Card title="📊 Risk Scoring Breakdown">
+                <div style={{ padding: "12px 20px" }}>
+                  <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 10, lineHeight: 1.6 }}>
+                    <strong>Baseline Comparison Rules:</strong><br/>
+                    Each transaction is compared to the initial transaction for this user/account.
+                  </div>
+                  
+                  <div style={{ fontSize: 11, marginBottom: 12, padding: "8px 10px", background: "#f8fafc", borderRadius: 6, color: "#475569" }}>
+                    <div style={{ marginBottom: 6 }}><strong>Parameter Risk Increases:</strong></div>
+                    <div>• Location change: <span style={{ color: "#d97706", fontWeight: 600 }}>+50%</span></div>
+                    <div>• Device change: <span style={{ color: "#d97706", fontWeight: 600 }}>+40%</span></div>
+                    <div>• IP change: <span style={{ color: "#d97706", fontWeight: 600 }}>+35%</span></div>
+                    <div>• Amount (1.5-2x): <span style={{ color: "#d97706", fontWeight: 600 }}>+15%</span> | 2-3x: +25% | 3-5x: +35% | 5x+: +50%</div>
+                    <div>• Rapid TX (&lt;3min): <span style={{ color: "#d97706", fontWeight: 600 }}>+40%</span> | &lt;10min: +25% | &lt;30min: +15%</div>
+                    <div>• Merchant change: <span style={{ color: "#d97706", fontWeight: 600 }}>+30%</span></div>
+                    <div>• Category change: <span style={{ color: "#d97706", fontWeight: 600 }}>+20%</span></div>
+                    <div>• Multiple changes: <span style={{ color: "#d97706", fontWeight: 600 }}>+10%</span> per parameter after 2</div>
+                  </div>
+
+                  <div style={{ fontSize: 11, marginBottom: 12, padding: "8px 10px", background: "#f8fafc", borderRadius: 6, color: "#475569" }}>
+                    <div style={{ marginBottom: 6 }}><strong>Decision Thresholds:</strong></div>
+                    <div>• 0-29%: <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ APPROVE</span> (LOW)</div>
+                    <div>• 30-49%: <span style={{ color: "#d97706", fontWeight: 600 }}>⚑ FLAG_FOR_REVIEW</span> (MEDIUM)</div>
+                    <div>• 50-64%: <span style={{ color: "#ea580c", fontWeight: 600 }}>📱 REQUIRE_OTP</span> (HIGH) ← OTP Zone</div>
+                    <div>• 65-74%: <span style={{ color: "#ea580c", fontWeight: 600 }}>🔒 HOLD_TRANSACTION</span> (HIGH)</div>
+                    <div>• 75-89%: <span style={{ color: "#dc2626", fontWeight: 600 }}>❄ FREEZE_ACCOUNT</span> (CRITICAL)</div>
+                    <div>• 90-100%: <span style={{ color: "#dc2626", fontWeight: 600 }}>✗ BLOCK</span> (CRITICAL)</div>
+                  </div>
+
+                  {result.coordinator?.comparison_indicators?.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#0f172a", marginBottom: 8 }}>Comparison Indicators:</div>
+                      {result.coordinator.comparison_indicators.map((ind, i) => (
+                        <div key={i} style={{ fontSize: 11, color: "#475569", padding: "4px 0", borderBottom: "1px solid #e2e8f0" }}>
+                          ✓ {ind}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {result.coordinator?.parameter_changes?.length > 0 && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#0f172a", marginBottom: 8 }}>Parameter Changes:</div>
+                      {result.coordinator.parameter_changes.map((change, i) => (
+                        <div key={i} style={{ fontSize: 11, color: "#d97706", fontWeight: 600, padding: "4px 0", borderBottom: "1px solid #e2e8f0" }}>
+                          {change}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </Card>
 

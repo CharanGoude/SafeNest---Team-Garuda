@@ -70,10 +70,27 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     timestamp       TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS baseline_transactions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id             TEXT NOT NULL,
+    account_number      TEXT NOT NULL,
+    amount              REAL NOT NULL,
+    location_country    TEXT NOT NULL,
+    location_city       TEXT,
+    merchant_name       TEXT NOT NULL,
+    merchant_category   TEXT DEFAULT 'RETAIL',
+    device_id           TEXT NOT NULL,
+    ip_address          TEXT NOT NULL,
+    timestamp           REAL NOT NULL,
+    created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, account_number)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tx_account   ON transactions(account_number);
 CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_tx_action    ON transactions(action);
 CREATE INDEX IF NOT EXISTS idx_bc_txid      ON blockchain_ledger(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_baseline_user ON baseline_transactions(user_id, account_number);
 """
 
 SEED = """
@@ -218,5 +235,32 @@ class Database:
                 "SELECT * FROM audit_logs WHERE transaction_id=? ORDER BY timestamp", (tx_id,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def save_baseline_transaction(self, data: Dict[str, Any]) -> bool:
+        """Save or update baseline transaction for a user/account."""
+        sql = """INSERT OR REPLACE INTO baseline_transactions
+            (user_id, account_number, amount, location_country, location_city,
+             merchant_name, merchant_category, device_id, ip_address, timestamp)
+            VALUES (:user_id, :account_number, :amount, :location_country, :location_city,
+                    :merchant_name, :merchant_category, :device_id, :ip_address, :timestamp)"""
+        try:
+            with self._conn() as conn:
+                conn.execute(sql, data)
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[DB] save_baseline_transaction error: {e}")
+            return False
+
+    def get_baseline_transaction(self, user_id: str, account_number: str) -> Optional[Dict]:
+        """Retrieve baseline transaction for a user/account."""
+        sql = "SELECT * FROM baseline_transactions WHERE user_id=? AND account_number=?"
+        try:
+            with self._conn() as conn:
+                row = conn.execute(sql, (user_id, account_number)).fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            print(f"[DB] get_baseline_transaction error: {e}")
+            return None
 
 db = Database()

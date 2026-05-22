@@ -1,4 +1,4 @@
-# 🛡️ SafeNest v2.0 — Autonomous Fraud Detection & Compliance System
+# 🛡️ SafeNest v2.0 — Baseline-Comparison Fraud Detection
 
 **Team Garuda | Dr MGR Educational And Research Institute**
 **Virtusa Jatayu Season 5 — Stage 3**
@@ -15,15 +15,108 @@
 
 ---
 
-## 🚀 What's New in v2.0
+## 🚀 Architecture - Coordinator Agent (v2.0)
 
-- ✅ **Removed Coordinator Agent** — direct 3-agent pipeline (Sentry → Auditor → Response)
-- ✅ **Real SQLite database** — persistent storage, not in-memory
-- ✅ **API Key authentication** — production-ready security
-- ✅ **Parallel agent execution** — Sentry & Auditor run simultaneously
-- ✅ **CTR/SAR auto-filing** — full regulatory compliance logic
-- ✅ **Clean bank integration** — one POST call, standard JSON
-- ✅ **Swagger API docs** — auto-generated at /docs
+### ✨ Key Features
+
+- ✅ **Coordinator Agent** — Baseline-comparison transaction scoring
+- ✅ **Removed Auditor** — KYC handled by banks directly
+- ✅ **Progressive Risk Scoring** — Each parameter deviation increases risk
+- ✅ **OTP at 50-64% Risk** — Smart authentication for medium-risk transactions
+- ✅ **SQLite Database** — Persistent baseline storage & transaction history
+- ✅ **Blockchain Ledger** — Immutable audit trail for compliance
+- ✅ **API Key Authentication** — Production-ready security
+- ✅ **Real-Time Alerts** — WebSocket notifications for high-risk transactions
+
+### 🎯 Risk Decision Thresholds
+
+| Score | Action | Risk Level | User Experience |
+|-------|--------|-----------|-----------------|
+| 0-29 | ✅ APPROVE | LOW | Instant approval |
+| 30-49 | 🚩 FLAG_FOR_REVIEW | MEDIUM | Analyst review |
+| 50-64 | 🔐 REQUIRE_OTP | HIGH | OTP verification |
+| 65-74 | ⏸️ HOLD_TRANSACTION | HIGH | Hold for review |
+| 75-89 | ❄️ FREEZE_ACCOUNT | CRITICAL | Account frozen |
+| 90-100 | 🛑 BLOCK | CRITICAL | Transaction blocked |
+
+### 📊 Parameter Risk Scoring
+
+Each parameter deviation from baseline increases risk:
+
+| Parameter | Risk Increase |
+|-----------|---------------|
+| Location Country Change | +50% |
+| Device ID Change | +40% |
+| IP Address Change | +35% |
+| Amount 2x-3x Baseline | +25% |
+| Amount 3x-5x Baseline | +35% |
+| Amount 5x+ Baseline | +50% |
+| Rapid Transaction (<3 min) | +40% |
+| Rapid Transaction (<10 min) | +25% |
+| Rapid Transaction (<30 min) | +15% |
+| Merchant Name Change | +30% |
+| Merchant Category Change | +20% |
+| Multiple Parameters (>2) | +10% penalty per change |
+| **Base Risk Score** | **10%** |
+
+---
+
+## 💡 How It Works
+
+### 1️⃣ First Transaction (Baseline)
+```
+User makes first transaction
+  ↓
+✅ Auto-APPROVED (Risk: 10%)
+  ↓
+Baseline saved to database
+```
+
+### 2️⃣ Subsequent Transactions (Comparison)
+```
+Transaction received
+  ↓
+Retrieve baseline from database
+  ↓
+Compare 8 parameters:
+  • Location (Country)
+  • Device ID
+  • IP Address
+  • Amount (vs baseline)
+  • Velocity (time gap)
+  • Merchant Name
+  • Merchant Category
+  • Multiple changes penalty
+  ↓
+Calculate: Base 10% + Deviations (max 100%)
+  ↓
+Decision based on risk score:
+  • 50-64 → OTP required
+  • 65-74 → Hold transaction
+  • 75-89 → Freeze account
+  • 90-100 → Block immediately
+```
+
+### 🔐 OTP Trigger Examples
+
+**OTP is triggered when risk score reaches 50-64:**
+
+```
+Example 1: Location change only
+  Risk = 10 (base) + 50 (location) = 60 → REQUIRE_OTP ✓
+
+Example 2: Device change only
+  Risk = 10 + 40 (device) = 50 → REQUIRE_OTP ✓
+
+Example 3: Amount 2x + Merchant change
+  Risk = 10 + 25 (amount) + 20 (merchant) = 55 → REQUIRE_OTP ✓
+
+Example 4: Location + Device (too high)
+  Risk = 10 + 50 + 40 = 100 (capped) → BLOCK ✗
+
+Example 5: Multiple small changes
+  Risk = 10 + 15 (amount) + 40 (device) = 65 → HOLD ✗
+```
 
 ---
 
@@ -33,16 +126,12 @@
 ```bash
 cd backend
 pip install -r requirements.txt
-
-# Optional: add Gemini API key for AI reasoning
-cp .env.example .env
-# Edit .env and add your GOOGLE_API_KEY
-
 uvicorn main:app --reload --port 8000
 ```
 
 ✅ Backend: http://localhost:8000
 ✅ API Docs: http://localhost:8000/docs
+✅ Health: http://localhost:8000/health
 
 ### Terminal 2 — Frontend
 ```bash
@@ -51,49 +140,209 @@ npm install
 npm run dev
 ```
 
-✅ Dashboard: http://localhost:3000 (or 3001 if 3000 is in use)
-### Terminal 3 — Transaction Simulator (Test Real-Time Flow)
+✅ Dashboard: http://localhost:3000 (or auto-detected port)
+
+### Terminal 3 — Simulate Transactions
 ```bash
 cd backend
 python simulator.py
 ```
 
-This lets you test fraud detection without needing a real bank:
-- Simulate normal transactions (low risk - APPROVE)
-- Simulate high-risk transactions (medium risk - OTP_REQUIRED)
-- Simulate fraudulent transactions (high risk - BLOCK)
-- Simulate continuous transaction stream (watch dashboard update in real-time)
+Test different scenarios:
+- ✅ **Safe transaction** — All parameters match → APPROVE
+- ✅ **Medium risk** — Location change → OTP required
+- ✅ **High risk** — Multiple changes → FREEZE/BLOCK
 
-### Terminal 4 — Bank Webhook Receiver (Optional - Test Integration)
-```bash
-cd backend
-python bank_webhook_receiver.py
-```
-
-This webhook receiver helps test how banks receive fraud detection notifications:
-- Verify webhook signatures
-- View received transaction results
-- Test end-to-end integration before production deployment
 ---
 
-## 🔧 Recent Fixes & Updates (v2.0.1)
+## 📁 Project Structure
 
-### Import Path Resolution
-- **Backend**: Fixed module import path for database (`agents/db/database.py`)
-  - Created `agents/db/__init__.py` to make it a proper Python package
-  - Updated import in `main.py` from `from db.database import db` to `from agents.db.database import db`
+```
+SafeNest/
+├── backend/
+│   ├── agents/
+│   │   ├── __init__.py
+│   │   ├── coordinator.py        ← NEW: Baseline comparison agent
+│   │   ├── response.py           ← Updated: New thresholds
+│   │   ├── sentry.py             ← Fraud detection (optional)
+│   │   ├── db/
+│   │   │   ├── __init__.py
+│   │   │   └── database.py       ← Updated: baseline_transactions table
+│   ├── main.py                   ← Updated: New pipeline
+│   ├── models.py
+│   ├── requirements.txt
+│   └── simulator.py
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── TransactionsPage.jsx
+│   │   │   ├── AnalyzePage.jsx
+│   │   │   └── BlockchainPage.jsx
+│   │   ├── utils/
+│   │   │   └── api.js
+│   │   ├── App.jsx
+│   │   └── main.jsx
+│   ├── vite.config.js
+│   ├── package.json
+│   └── index.html
+├── COORDINATOR_AGENT_CHANGES.md    ← Implementation details
+├── TRANSACTION_SCORING_GUIDE.md    ← Scoring logic
+├── OTP_TRIGGER_RULES.md            ← OTP examples
+├── IMPLEMENTATION_CHECKLIST.md
+└── README.md
+```
 
-- **Frontend**: Consolidated API utilities
-  - Moved `/frontend/utils/api.js` to `/frontend/src/utils/api.js` for proper module resolution
-  - Updated all component imports to use correct relative paths:
-    - `App.jsx`: `./utils/api`
-    - Page components: `../utils/api`
+---
 
-### Build & Run Status
-- ✅ Backend running on http://localhost:8000
-- ✅ Frontend running on http://localhost:3001 (auto-detected available port)
-- ✅ All module imports resolved
-- ✅ Auto-reload enabled for both services
+## 📊 API Endpoints
+
+### Core Transaction Analysis
+```http
+POST /api/v1/analyze
+X-API-Key: sk-safenest-demo-key-2026
+
+{
+  "user_id": "user_rahul_k",
+  "account_number": "ACC123456",
+  "amount": 2500.0,
+  "location_country": "US",
+  "location_city": "New York",
+  "device_id": "iPhone_14",
+  "ip_address": "185.220.1.1",
+  "merchant_name": "Amazon",
+  "merchant_category": "RETAIL",
+  "account_age_days": 730,
+  "user_avg_transaction": 800.0,
+  "previous_transaction_minutes_ago": 120
+}
+```
+
+**Response:**
+```json
+{
+  "transaction_id": "ABC12345",
+  "action": "REQUIRE_OTP",
+  "risk_level": "HIGH",
+  "final_risk_score": 60,
+  "alert_message": "OTP verification required. Risk score 60/100.",
+  "comparison_indicators": [
+    "Country location changed: IN → US (+50%)",
+    "Transaction amount 2.5x baseline: $800 → $2500 (+25%)"
+  ],
+  "parameter_changes": [
+    "Location: IN → US (+50%)",
+    "Amount: $800 → $2500 (2.5x, +25%)"
+  ]
+}
+```
+
+### Other Endpoints
+```http
+GET /api/v1/transactions              # List all transactions
+GET /api/v1/transactions/{id}         # Transaction details
+GET /api/v1/stats                     # Dashboard statistics
+GET /api/v1/blockchain                # Blockchain ledger
+GET /health                            # System health
+POST /api/v1/simulate?count=5         # Test simulator
+```
+
+---
+
+## 🗄️ Database Schema
+
+### New Table: baseline_transactions
+```sql
+user_id             TEXT (Primary Key Part 1)
+account_number      TEXT (Primary Key Part 2)
+amount              REAL
+location_country    TEXT
+location_city       TEXT
+merchant_name       TEXT
+merchant_category   TEXT
+device_id           TEXT
+ip_address          TEXT
+timestamp           REAL
+```
+
+Each user/account combination has ONE baseline (first transaction).
+
+---
+
+## 🔒 Security & Compliance
+
+- ✅ **API Key Authentication** — All requests require valid API key
+- ✅ **Baseline Verification** — Prevents account takeover via profile switching
+- ✅ **Progressive Controls** — OTP → Hold → Freeze → Block
+- ✅ **Blockchain Audit Trail** — Immutable record of all decisions
+- ✅ **Real-Time Alerts** — Security team notified of suspicious activity
+- ✅ **Secondary Actions** — Auto-escalation to compliance officers
+
+---
+
+## 📝 Documentation
+
+- **[COORDINATOR_AGENT_CHANGES.md](COORDINATOR_AGENT_CHANGES.md)** — Implementation overview
+- **[TRANSACTION_SCORING_GUIDE.md](TRANSACTION_SCORING_GUIDE.md)** — Detailed scoring examples
+- **[OTP_TRIGGER_RULES.md](OTP_TRIGGER_RULES.md)** — OTP trigger scenarios
+- **[IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md)** — Deployment checklist
+
+---
+
+## 🚀 Deployment
+
+### Local Development
+```bash
+# Backend
+cd backend && uvicorn main:app --reload
+
+# Frontend (in another terminal)
+cd frontend && npm run dev
+```
+
+### Production
+```bash
+# Backend
+gunicorn main:app --workers 4
+
+# Frontend
+npm run build
+serve dist/
+```
+
+---
+
+## 📞 API Keys for Testing
+
+| Bank | API Key | Status |
+|------|---------|--------|
+| Demo Bank | `sk-safenest-demo-key-2026` | ✅ Active |
+| Test Integration | `sk-safenest-test-key-2026` | ✅ Active |
+
+---
+
+## 🎯 Version Info
+
+- **Current Version:** 2.0.0
+- **Architecture:** Coordinator Agent (Baseline-Comparison)
+- **Database:** SQLite
+- **Frontend:** React + Vite
+- **Backend:** FastAPI + Python 3.10+
+- **Last Updated:** May 2026
+
+---
+
+## ✅ Implementation Status
+
+- ✅ Coordinator Agent implemented
+- ✅ Baseline-comparison scoring
+- ✅ OTP trigger logic (50-64 range)
+- ✅ Risk thresholds configured
+- ✅ Database schema updated
+- ✅ API endpoints working
+- ✅ Frontend integration ready
+- ✅ Documentation complete
 
 ---
 
